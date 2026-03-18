@@ -21,14 +21,74 @@ export default function MapClient() {
     const [tableSearch, setTableSearch] = useState("");
     const markersRef = useRef<Map<string, any>>(new Map());
 
-    const removePin = useCallback((id: string) => {
-        const marker = markersRef.current.get(id);
-        if (mapInstanceRef.current && marker) {
-            mapInstanceRef.current.removeLayer(marker);
-            markersRef.current.delete(id);
-        }
-        setPins(prev => prev.filter(p => p.id !== id));
+    // POBIERANIE Z BAZY PRZY STARCIE
+    useEffect(() => {
+        fetch('http://localhost:8000/api/pins/')
+            .then(res => res.json())
+            .then(data => {
+                const loadedPins = data.map((p: any) => ({
+                    id: p.id.toString(),
+                    latlng: [p.latitude, p.longitude],
+                    name: p.name,
+                    address: p.address
+                }));
+                setPins(loadedPins);
+                loadedPins.forEach((pin: Pin) => addMarkerToMap(pin));
+            })
+            .catch(err => console.error("Błąd pobierania z bazy:", err));
     }, []);
+
+    const removePin = useCallback(async (id: string) => {
+        try {
+            await fetch(`http://localhost:8000/api/pins/${id}/`, {
+                method: 'DELETE',
+            });
+
+            const marker = markersRef.current.get(id);
+            if (mapInstanceRef.current && marker) {
+                mapInstanceRef.current.removeLayer(marker);
+                markersRef.current.delete(id);
+            }
+            setPins(prev => prev.filter(p => p.id !== id));
+        } catch (err) {
+            console.error("Błąd usuwania z bazy:", err);
+        }
+    }, []);
+
+    const addMarkerToMap = useCallback((pin: Pin) => {
+        if (!mapInstanceRef.current || markersRef.current.has(pin.id)) return;
+        const L = (window as any).L;
+        if (!L) return;
+
+        const redIcon = L.icon({
+            iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+            iconSize: [35, 56],
+            iconAnchor: [17, 56],
+            popupAnchor: [1, -45],
+            shadowSize: [51, 51]
+        });
+
+        const marker = L.marker(pin.latlng, { icon: redIcon }).addTo(mapInstanceRef.current);
+
+        const popupContent = document.createElement('div');
+        popupContent.innerHTML = `
+          <div style="font-family: sans-serif; min-width: 150px;">
+            <b style="font-size: 14px;">${pin.address || "Brak adresu"}</b><br/>
+            <span style="color: #666;">${pin.name}</span><br/>
+            <button id="btn-del-${pin.id}" style="margin-top: 10px; background: #ff4d4d; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; width: 100%;">Usuń pineskę</button>
+          </div>
+        `;
+
+        marker.bindPopup(popupContent);
+        marker.on('popupopen', () => {
+            document.getElementById(`btn-del-${pin.id}`)?.addEventListener('click', () => {
+                removePin(pin.id);
+            });
+        });
+
+        markersRef.current.set(pin.id, marker);
+    }, [removePin]);
 
     useEffect(() => {
         if (typeof window === "undefined" || mapInstanceRef.current) return;
@@ -58,6 +118,8 @@ export default function MapClient() {
             L.control.zoom({ position: 'bottomright' }).addTo(map);
             mapInstanceRef.current = map;
 
+            pins.forEach(pin => addMarkerToMap(pin));
+
             map.on('click', (e: any) => {
                 setTempLatLng([e.latlng.lat, e.latlng.lng]);
                 setModalOpen(true);
@@ -65,43 +127,7 @@ export default function MapClient() {
             });
         };
         document.head.appendChild(script);
-    }, []);
-
-    // FUNKCJA DODAJĄCA WIĘKSZĄ, CZERWONĄ PINESKĘ
-    const addMarkerToMap = useCallback((pin: Pin) => {
-        if (!mapInstanceRef.current) return;
-        const L = (window as any).L;
-
-        // Tworzymy własną ikonę: większą (40x65px zamiast 25x41px) i czerwoną
-        const redIcon = L.icon({
-            iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-            iconSize: [35, 56], // Rozmiar pineski (znacznie większa)
-            iconAnchor: [17, 56], // Punkt styku z mapą
-            popupAnchor: [1, -45], // Miejsce, gdzie wyskakuje okienko
-            shadowSize: [51, 51]
-        });
-
-        const marker = L.marker(pin.latlng, { icon: redIcon }).addTo(mapInstanceRef.current);
-
-        const popupContent = document.createElement('div');
-        popupContent.innerHTML = `
-          <div style="font-family: sans-serif; min-width: 150px;">
-            <b style="font-size: 14px;">${pin.address}</b><br/>
-            <span style="color: #666;">${pin.name}</span><br/>
-            <button id="btn-del-${pin.id}" style="margin-top: 10px; background: #ff4d4d; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; width: 100%;">Usuń pineskę</button>
-          </div>
-        `;
-
-        marker.bindPopup(popupContent);
-        marker.on('popupopen', () => {
-            document.getElementById(`btn-del-${pin.id}`)?.addEventListener('click', () => {
-                removePin(pin.id);
-            });
-        });
-
-        markersRef.current.set(pin.id, marker);
-    }, [removePin]);
+    }, [pins.length, addMarkerToMap]);
 
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -121,24 +147,47 @@ export default function MapClient() {
 
     const handleSave = async () => {
         if (!pinName.trim() || !tempLatLng) return;
-        let finalAddress = "Pobieranie...";
-        try {
-            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${tempLatLng[0]}&lon=${tempLatLng[1]}&addressdetails=1`);
-            const data = await res.json();
-            const a = data.address;
-            finalAddress = (a.road || a.pedestrian || a.suburb || "Ostrów") + (a.house_number ? ` ${a.house_number}` : "");
-        } catch (e) { finalAddress = "Nieznany adres"; }
 
-        const newPin: Pin = { id: Date.now().toString(), latlng: tempLatLng, name: pinName.trim(), address: finalAddress };
-        setPins(prev => [...prev, newPin]);
-        setModalOpen(false);
-        addMarkerToMap(newPin);
-        setSearchQuery("");
+        // Ustawiamy szybki adres, żeby nie mulić Nominatimem
+        const finalAddress = `Współrzędne: ${tempLatLng[0].toFixed(4)}, ${tempLatLng[1].toFixed(4)}`;
+
+        const pinData = {
+            name: pinName.trim(),
+            address: finalAddress,
+            latitude: tempLatLng[0],
+            longitude: tempLatLng[1]
+        };
+
+        try {
+            const response = await fetch('http://localhost:8000/api/pins/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(pinData)
+            });
+
+            if (response.ok) {
+                const savedPin = await response.json();
+                const newPin: Pin = {
+                    id: savedPin.id.toString(),
+                    latlng: [savedPin.latitude, savedPin.longitude],
+                    name: savedPin.name,
+                    address: savedPin.address
+                };
+                setPins(prev => [...prev, newPin]);
+                setModalOpen(false);
+                addMarkerToMap(newPin);
+                setSearchQuery("");
+                setPinName("");
+            }
+        } catch (err) {
+            console.error("Błąd zapisu w bazie:", err);
+            alert("Błąd połączenia z backendem!");
+        }
     };
 
     const filteredPins = pins.filter(pin =>
         pin.name.toLowerCase().includes(tableSearch.toLowerCase()) ||
-        pin.address?.toLowerCase().includes(tableSearch.toLowerCase())
+        (pin.address && pin.address.toLowerCase().includes(tableSearch.toLowerCase()))
     );
 
     return (
