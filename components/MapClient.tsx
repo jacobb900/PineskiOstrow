@@ -11,6 +11,7 @@ interface Pin {
 }
 
 export default function MapClient() {
+    const [mounted, setMounted] = useState(false);
     const mapRef = useRef<HTMLDivElement>(null);
     const mapInstanceRef = useRef<any>(null);
     const [pins, setPins] = useState<Pin[]>([]);
@@ -21,38 +22,16 @@ export default function MapClient() {
     const [tableSearch, setTableSearch] = useState("");
     const markersRef = useRef<Map<string, any>>(new Map());
 
-    // POBIERANIE Z BAZY PRZY STARCIE
+    const [token, setToken] = useState<string | null>(null);
+    const [loginModalOpen, setLoginModalOpen] = useState(false);
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+
+    // 1. Zabezpieczenie przed błędem 500 (SSR)
     useEffect(() => {
-        fetch('http://localhost:8000/api/pins/')
-            .then(res => res.json())
-            .then(data => {
-                const loadedPins = data.map((p: any) => ({
-                    id: p.id.toString(),
-                    latlng: [p.latitude, p.longitude],
-                    name: p.name,
-                    address: p.address
-                }));
-                setPins(loadedPins);
-                loadedPins.forEach((pin: Pin) => addMarkerToMap(pin));
-            })
-            .catch(err => console.error("Błąd pobierania z bazy:", err));
-    }, []);
-
-    const removePin = useCallback(async (id: string) => {
-        try {
-            await fetch(`http://localhost:8000/api/pins/${id}/`, {
-                method: 'DELETE',
-            });
-
-            const marker = markersRef.current.get(id);
-            if (mapInstanceRef.current && marker) {
-                mapInstanceRef.current.removeLayer(marker);
-                markersRef.current.delete(id);
-            }
-            setPins(prev => prev.filter(p => p.id !== id));
-        } catch (err) {
-            console.error("Błąd usuwania z bazy:", err);
-        }
+        setMounted(true);
+        const savedToken = localStorage.getItem('token');
+        if (savedToken) setToken(savedToken);
     }, []);
 
     const addMarkerToMap = useCallback((pin: Pin) => {
@@ -82,16 +61,74 @@ export default function MapClient() {
 
         marker.bindPopup(popupContent);
         marker.on('popupopen', () => {
-            document.getElementById(`btn-del-${pin.id}`)?.addEventListener('click', () => {
-                removePin(pin.id);
-            });
+            const btn = document.getElementById(`btn-del-${pin.id}`);
+            if (btn) btn.onclick = () => removePin(pin.id);
         });
 
         markersRef.current.set(pin.id, marker);
-    }, [removePin]);
+    }, []);
 
+    // 2. Pobieranie pinesek (tylko raz po zamontowaniu)
     useEffect(() => {
-        if (typeof window === "undefined" || mapInstanceRef.current) return;
+        if (!mounted) return;
+        fetch('http://localhost:8000/api/pins/')
+            .then(res => res.json())
+            .then(data => {
+                const loadedPins = data.map((p: any) => ({
+                    id: p.id.toString(),
+                    latlng: [p.latitude, p.longitude],
+                    name: p.name,
+                    address: p.address
+                }));
+                setPins(loadedPins);
+            })
+            .catch(err => console.error("Błąd pobierania:", err));
+    }, [mounted]);
+
+    // 3. Usuwanie pineski
+    const removePin = async (id: string) => {
+        const currentToken = localStorage.getItem('token');
+        if (!currentToken) return alert("Zaloguj się!");
+
+        try {
+            const res = await fetch(`http://localhost:8000/api/pins/${id}/`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${currentToken}` }
+            });
+            if (res.ok) {
+                const marker = markersRef.current.get(id);
+                if (marker) mapInstanceRef.current.removeLayer(marker);
+                markersRef.current.delete(id);
+                setPins(prev => prev.filter(p => p.id !== id));
+            }
+        } catch (err) { console.error(err); }
+    };
+
+    const handleLogin = async (e: React.FormEvent) => {
+        e.preventDefault();
+        try {
+            const res = await fetch('http://localhost:8000/api/token/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                localStorage.setItem('token', data.access);
+                setToken(data.access);
+                setLoginModalOpen(false);
+            } else { alert("Błędne dane"); }
+        } catch (err) { console.error(err); }
+    };
+
+    const handleLogout = () => {
+        localStorage.removeItem('token');
+        setToken(null);
+    };
+
+    // 4. Inicjalizacja Mapy
+    useEffect(() => {
+        if (!mounted || mapInstanceRef.current) return;
 
         const link = document.createElement("link");
         link.rel = "stylesheet";
@@ -102,156 +139,112 @@ export default function MapClient() {
         script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
         script.onload = () => {
             const L = (window as any).L;
-
-            const googleHybrid = L.tileLayer('http://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}', {
-                maxZoom: 20,
-                subdomains:['mt0','mt1','mt2','mt3']
-            });
-
             const map = L.map(mapRef.current!, {
                 center: [51.649, 17.812],
                 zoom: 17,
-                layers: [googleHybrid],
                 zoomControl: false,
             });
-
+            L.tileLayer('http://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}', {
+                subdomains:['mt0','mt1','mt2','mt3']
+            }).addTo(map);
             L.control.zoom({ position: 'bottomright' }).addTo(map);
             mapInstanceRef.current = map;
-
-            pins.forEach(pin => addMarkerToMap(pin));
 
             map.on('click', (e: any) => {
                 setTempLatLng([e.latlng.lat, e.latlng.lng]);
                 setModalOpen(true);
-                setPinName("");
             });
         };
         document.head.appendChild(script);
-    }, [pins.length, addMarkerToMap]);
+    }, [mounted]);
 
-    const handleSearch = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!searchQuery.trim() || !mapInstanceRef.current) return;
+    // 5. Dodawanie markerów do mapy kiedy zmieni się lista pins
+    useEffect(() => {
+        if (mapInstanceRef.current) {
+            pins.forEach(pin => addMarkerToMap(pin));
+        }
+    }, [pins, addMarkerToMap]);
+
+    const handleSave = async () => {
+        const currentToken = localStorage.getItem('token');
+        if (!pinName.trim() || !tempLatLng || !currentToken) return alert("Błąd danych lub brak logowania!");
+
         try {
-            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery + ", Ostrów Wielkopolski")}&limit=1`);
-            const data = await res.json();
-            if (data && data.length > 0) {
-                const coords: [number, number] = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-                mapInstanceRef.current.flyTo(coords, 18);
-                setTempLatLng(coords);
-                setPinName(searchQuery);
-                setModalOpen(true);
+            const res = await fetch('http://localhost:8000/api/pins/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${currentToken}`
+                },
+                body: JSON.stringify({
+                    name: pinName,
+                    address: `Współrzędne: ${tempLatLng[0].toFixed(4)}, ${tempLatLng[1].toFixed(4)}`,
+                    latitude: tempLatLng[0],
+                    longitude: tempLatLng[1]
+                })
+            });
+
+            if (res.ok) {
+                const saved = await res.json();
+                setPins(prev => [...prev, {
+                    id: saved.id.toString(),
+                    latlng: [saved.latitude, saved.longitude],
+                    name: saved.name,
+                    address: saved.address
+                }]);
+                setModalOpen(false);
+                setPinName("");
             }
         } catch (err) { console.error(err); }
     };
 
-    const handleSave = async () => {
-        if (!pinName.trim() || !tempLatLng) return;
-
-        // Ustawiamy szybki adres, żeby nie mulić Nominatimem
-        const finalAddress = `Współrzędne: ${tempLatLng[0].toFixed(4)}, ${tempLatLng[1].toFixed(4)}`;
-
-        const pinData = {
-            name: pinName.trim(),
-            address: finalAddress,
-            latitude: tempLatLng[0],
-            longitude: tempLatLng[1]
-        };
-
-        try {
-            const response = await fetch('http://localhost:8000/api/pins/', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(pinData)
-            });
-
-            if (response.ok) {
-                const savedPin = await response.json();
-                const newPin: Pin = {
-                    id: savedPin.id.toString(),
-                    latlng: [savedPin.latitude, savedPin.longitude],
-                    name: savedPin.name,
-                    address: savedPin.address
-                };
-                setPins(prev => [...prev, newPin]);
-                setModalOpen(false);
-                addMarkerToMap(newPin);
-                setSearchQuery("");
-                setPinName("");
-            }
-        } catch (err) {
-            console.error("Błąd zapisu w bazie:", err);
-            alert("Błąd połączenia z backendem!");
-        }
-    };
-
-    const filteredPins = pins.filter(pin =>
-        pin.name.toLowerCase().includes(tableSearch.toLowerCase()) ||
-        (pin.address && pin.address.toLowerCase().includes(tableSearch.toLowerCase()))
-    );
+    if (!mounted) return null;
 
     return (
         <>
             <style>{`
                 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500;700&display=swap');
-                body { margin: 0; font-family: 'DM Sans', sans-serif; background: #faf8f5; color: #1a1a2e; }
-                .search-box { position: absolute; top: 20px; left: 20px; z-index: 1100; width: 320px; background: white; border-radius: 12px; display: flex; align-items: center; padding: 2px 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); border: 1px solid #ddd; }
-                .search-input { flex: 1; border: none; padding: 12px 0; font-size: 15px; outline: none; background: transparent; }
-                .table-search { width: 100%; padding: 10px 15px; border-radius: 10px; border: 1px solid #ddd; margin-bottom: 15px; font-size: 14px; outline: none; box-sizing: border-box; }
+                body { margin: 0; font-family: 'DM Sans', sans-serif; background: #faf8f5; }
+                .search-box { position: absolute; top: 20px; left: 20px; z-index: 1100; width: 320px; background: white; border-radius: 12px; padding: 5px 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); border: 1px solid #ddd; }
+                .admin-btn { position: absolute; top: 20px; right: 20px; z-index: 1100; padding: 12px 20px; border-radius: 12px; border: none; cursor: pointer; color: white; font-weight: bold; }
             `}</style>
 
             <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: '10px' }}>
-                <header style={{ paddingBottom: '10px' }}>
-                    <h1 style={{ fontFamily: 'Syne', fontSize: '22px', margin: 0 }}>Mapa Ostrowa Wlkp.</h1>
-                </header>
-
-                <div style={{ flex: 1, borderRadius: '24px', overflow: 'hidden', position: 'relative', border: '1px solid #e2e8f0' }}>
-                    <form className="search-box" onSubmit={handleSearch}>
-                        <span style={{ marginRight: '10px' }}>🔍</span>
-                        <input className="search-input" type="text" placeholder="Wyszukaj na mapie..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
-                    </form>
+                <button className="admin-btn" onClick={() => token ? handleLogout() : setLoginModalOpen(true)} style={{ background: token ? '#4CAF50' : '#333' }}>
+                    {token ? 'Wyloguj Admina' : 'Zaloguj Admina'}
+                </button>
+                <div style={{ flex: 1, borderRadius: '24px', overflow: 'hidden', position: 'relative' }}>
                     <div ref={mapRef} style={{ height: '100%', width: '100%' }} />
                 </div>
-
-                <div style={{ marginTop: '20px', padding: '20px', border: '1px solid #ccc', borderRadius: '16px', backgroundColor: '#fff', maxHeight: '35vh', overflowY: 'auto' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-                        <h3 style={{ margin: 0, fontFamily: 'Syne' }}>Twoje zapisane adresy:</h3>
-                        <span style={{ fontSize: '12px', background: '#ff4d4d', color: 'white', padding: '4px 10px', borderRadius: '20px' }}>{pins.length} pinesek</span>
-                    </div>
-
-                    <input className="table-search" type="text" placeholder="Filtruj listę..." value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} />
-
-                    <ul style={{ listStyleType: 'none', padding: 0 }}>
-                        {filteredPins.length === 0 ? (
-                            <li style={{ color: '#888', textAlign: 'center', padding: '20px' }}>Brak zapisanych miejsc.</li>
-                        ) : (
-                            filteredPins.map((pin) => (
-                                <li key={pin.id} style={{ padding: '12px 0', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div>
-                                        <strong style={{ fontSize: '16px', display: 'block' }}>{pin.address}</strong>
-                                        <span style={{ fontSize: '13px', color: '#666' }}>{pin.name}</span>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '8px' }}>
-                                        <button onClick={() => mapInstanceRef.current?.flyTo(pin.latlng, 18)} style={{ background: '#eee', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer' }}>👁️</button>
-                                        <button onClick={() => removePin(pin.id)} style={{ background: '#ff4d4d', color: 'white', border: 'none', borderRadius: '8px', padding: '8px 15px', cursor: 'pointer' }}>Usuń</button>
-                                    </div>
-                                </li>
-                            ))
-                        )}
-                    </ul>
+                <div style={{ marginTop: '10px', padding: '15px', background: 'white', borderRadius: '15px', maxHeight: '30vh', overflowY: 'auto' }}>
+                    <h3>Zapisane miejsca ({pins.length}):</h3>
+                    {pins.map(p => (
+                        <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #eee' }}>
+                            <span>{p.name}</span>
+                            <button onClick={() => removePin(p.id)} style={{ color: 'red', border: 'none', background: 'none', cursor: 'pointer' }}>Usuń</button>
+                        </div>
+                    ))}
                 </div>
             </div>
 
             {modalOpen && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <div style={{ background: '#fff', padding: '30px', borderRadius: '24px', width: '90%', maxWidth: '380px' }}>
-                        <h3 style={{ fontFamily: 'Syne', margin: '0 0 15px' }}>Zapisz to miejsce</h3>
-                        <input autoFocus value={pinName} onChange={e => setPinName(e.target.value)} style={{ width: '100%', padding: '14px', borderRadius: '12px', border: '1px solid #ddd' }} />
-                        <div style={{ display: 'flex', gap: '10px', marginTop: '25px' }}>
-                            <button onClick={() => setModalOpen(false)} style={{ flex: 1, padding: '12px', borderRadius: '12px', border: '1px solid #ddd' }}>Anuluj</button>
-                            <button onClick={handleSave} style={{ flex: 1, padding: '12px', borderRadius: '12px', border: 'none', background: '#ff4d4d', color: '#fff' }}>Zapisz</button>
-                        </div>
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <div style={{ background: 'white', padding: '20px', borderRadius: '15px' }}>
+                        <input placeholder="Nazwa miejsca" value={pinName} onChange={e => setPinName(e.target.value)} style={{ padding: '10px', width: '200px' }} />
+                        <button onClick={handleSave}>Zapisz</button>
+                        <button onClick={() => setModalOpen(false)}>Anuluj</button>
                     </div>
+                </div>
+            )}
+
+            {loginModalOpen && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 20000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <form onSubmit={handleLogin} style={{ background: 'white', padding: '20px', borderRadius: '15px' }}>
+                        <input placeholder="Login" value={username} onChange={e => setUsername(e.target.value)} style={{ display: 'block', marginBottom: '10px' }} />
+                        <input type="password" placeholder="Hasło" value={password} onChange={e => setPassword(e.target.value)} style={{ display: 'block', marginBottom: '10px' }} />
+                        <button type="submit">Zaloguj</button>
+                        <button type="button" onClick={() => setLoginModalOpen(false)}>Anuluj</button>
+                    </form>
                 </div>
             )}
         </>
